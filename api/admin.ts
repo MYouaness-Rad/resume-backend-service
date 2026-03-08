@@ -480,6 +480,11 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
 
           const topRepos = reposWithCommits.sort((a, b) => b.commits_count - a.commits_count).slice(0, 12);
 
+          // Calculate date range: last year (matching GitHub's contribution graph)
+          const since = new Date();
+          since.setFullYear(since.getFullYear() - 1);
+          const sinceDateStr = since.toISOString().split('T')[0]; // Format: YYYY-MM-DD
+
           // Fetch user events (commits, PRs, reviews, issues) for the full year
           // GitHub's contribution graph counts: commits, PRs, issues opened, PR reviews
           let events: any[] = [];
@@ -552,11 +557,6 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
           } catch (error) {
             console.warn('Failed to fetch user events:', error);
           }
-
-          // Calculate date range: last year (matching GitHub's contribution graph)
-          const since = new Date();
-          since.setFullYear(since.getFullYear() - 1);
-          const sinceDateStr = since.toISOString().split('T')[0]; // Format: YYYY-MM-DD
           
           console.log(`📊 Fetching GitHub activity for ${username}`, {
             totalRepos: reposWithCommits.length,
