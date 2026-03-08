@@ -490,6 +490,11 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
           const emails = req.query?.emails as string | string[] | undefined;
           const emailList = emails ? (Array.isArray(emails) ? emails : emails.split(',').map(e => e.trim()).filter(Boolean)) : [];
           
+          // Calculate date range: last year (matching GitHub's contribution graph)
+          const since = new Date();
+          since.setFullYear(since.getFullYear() - 1);
+          const sinceISO = since.toISOString();
+          
           console.log(`📊 Fetching GitHub activity for ${username}`, {
             totalRepos: reposWithCommits.length,
             emailList: emailList.length > 0 ? emailList : 'none',
@@ -499,11 +504,6 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
           // Fetch commits from ALL repos (not just top 10) to get full contribution history
           const commitEvents: any[] = [];
           const existingShas = new Set<string>(); // Track all commit SHAs to avoid duplicates
-          
-          // Calculate date range: last year (matching GitHub's contribution graph)
-          const since = new Date();
-          since.setFullYear(since.getFullYear() - 1);
-          const sinceISO = since.toISOString();
           
           // Fetch commits from all repos, not just top 10
           // Process repos in batches to avoid rate limits
