@@ -539,26 +539,41 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
                   // Extract repository info from the search result
                   // GitHub Search API returns repository object with full_name
                   const repo = item.repository;
-                  const isPrivate = repo?.private === true;
                   const repoOwner = repo?.owner?.login || username;
                   const repoName = repo?.name || 'Unknown';
-                  const repoFullName = repo?.full_name || 
+                  // Preserve original casing for display, but normalize for matching
+                  const repoFullNameOriginal = repo?.full_name || 
                                      (repoOwner && repoName ? `${repoOwner}/${repoName}` : null) ||
                                      'Unknown';
+                  const repoFullNameNormalized = repoFullNameOriginal.toLowerCase();
+                  
+                  // Check if repo is private by cross-referencing with reposWithCommits
+                  // GitHub Search API might not return private flag, so we check our known repos
+                  const knownRepo = reposWithCommits.find((r: any) => 
+                    r.full_name?.toLowerCase() === repoFullNameNormalized || 
+                    r.full_name?.toLowerCase() === `${repoOwner}/${repoName}`.toLowerCase() ||
+                    (r.name?.toLowerCase() === repoName.toLowerCase() && r.owner?.toLowerCase() === repoOwner.toLowerCase())
+                  );
+                  
+                  // Check if repo is private: from known repos, API response, or if name equals owner (common pattern for private repos)
+                  const isPrivate = knownRepo?.visibility === 'private' || 
+                                   repo?.private === true ||
+                                   (repoName.toLowerCase() === repoOwner.toLowerCase() && !knownRepo); // If name equals owner and not in public repos, likely private
                   
                   // For private repos, use organization name if available, otherwise show "Private Repo"
                   // Use cached display name if we've seen this repo before to ensure consistency
+                  // Use normalized repoFullName as cache key to prevent duplicates
                   let displayRepoName = repoName;
-                  let displayFullName = repoFullName;
+                  let displayFullName = repoFullNameOriginal;
                   
-                  if (repoDisplayNameMap.has(repoFullName)) {
+                  if (repoDisplayNameMap.has(repoFullNameNormalized)) {
                     // Use cached display name for consistency
-                    const cached = repoDisplayNameMap.get(repoFullName)!;
+                    const cached = repoDisplayNameMap.get(repoFullNameNormalized)!;
                     displayRepoName = cached.name;
                     displayFullName = cached.full_name;
                   } else if (isPrivate) {
                     // Check if it's an organization repo
-                    const isOrgRepo = repo?.owner?.type === 'Organization';
+                    const isOrgRepo = repo?.owner?.type === 'Organization' || (knownRepo?.owner && knownRepo.owner.toLowerCase() !== username.toLowerCase());
                     if (isOrgRepo && repoOwner) {
                       // Show organization name for private org repos
                       displayRepoName = repoOwner;
@@ -568,8 +583,8 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
                       displayRepoName = 'Private Repo';
                       displayFullName = `${repoOwner}/[Private]`;
                     }
-                    // Cache the display name for this repo
-                    repoDisplayNameMap.set(repoFullName, { name: displayRepoName, full_name: displayFullName });
+                    // Cache the display name for this repo (use normalized key)
+                    repoDisplayNameMap.set(repoFullNameNormalized, { name: displayRepoName, full_name: displayFullName });
                   }
                   
                   commitEvents.push({
@@ -609,6 +624,12 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
             }
             
             console.log(`✅ Fetched ${commitEvents.length} commits via Search API`);
+            console.log(`📊 Repo display name mapping:`, Array.from(repoDisplayNameMap.entries()).slice(0, 10));
+            console.log(`🔍 Sample commit events (first 5):`, commitEvents.slice(0, 5).map(e => ({
+              repo: e.repo?.full_name,
+              name: e.repo?.name,
+              private: e.repo?.private
+            })));
           } catch (searchErr: any) {
             console.warn(`Failed to fetch commits via Search API:`, searchErr?.message || searchErr);
             // Fallback: if search API fails, we'll just use the events we already have
