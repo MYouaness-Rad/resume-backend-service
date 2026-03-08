@@ -786,9 +786,11 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
                   
                   while (hasMoreRepoCommits && repoPage <= maxRepoPages) {
                     try {
+                      // Fetch commits filtered by author (username) to only get user's commits
                       const repoCommitsResponse = await githubStorage.octokit.repos.listCommits({
                         owner: repoOwner,
                         repo: repoName,
+                        author: username, // Filter by username (includes all associated emails)
                         since: sinceDateStr,
                         per_page: 100,
                         page: repoPage
