@@ -554,6 +554,60 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
             }
             
             console.log(`✅ Fetched ${events.length} public events (pages ${eventsPage - 1})`);
+            
+            // Also fetch PRs, Issues, and Reviews separately for public repos
+            // This helps capture contributions that might not appear in public events
+            try {
+              console.log(`🔍 Fetching PRs, Issues, and Reviews for public repos...`);
+              const publicRepos = reposWithCommits.filter((r: any) => r.visibility === 'public').slice(0, 20); // Limit to avoid rate limits
+              
+              for (const repo of publicRepos) {
+                try {
+                  // Fetch PRs
+                  const prsResponse = await githubStorage.octokit.pulls.list({
+                    owner: repo.owner || username,
+                    repo: repo.name,
+                    state: 'all',
+                    per_page: 100,
+                    sort: 'updated',
+                    direction: 'desc'
+                  });
+                  
+                  // Filter PRs by author and date
+                  const relevantPRs = prsResponse.data
+                    .filter((pr: any) => {
+                      const prDate = new Date(pr.created_at);
+                      return pr.user?.login === username && prDate >= eventsSinceDate;
+                    })
+                    .map((pr: any) => ({
+                      type: 'PullRequestEvent',
+                      id: `pr-${pr.id}`,
+                      created_at: pr.created_at,
+                      repo: {
+                        name: repo.name,
+                        full_name: repo.full_name,
+                        owner: repo.owner
+                      },
+                      payload: {
+                        action: pr.state === 'closed' && pr.merged_at ? 'closed' : pr.state,
+                        pull_request: pr
+                      }
+                    }));
+                  
+                  events.push(...relevantPRs);
+                  
+                  // Small delay to avoid rate limits
+                  await new Promise(resolve => setTimeout(resolve, 200));
+                } catch (repoErr: any) {
+                  // Skip repos that fail (might be private or deleted)
+                  continue;
+                }
+              }
+              
+              console.log(`✅ Added ${events.length - (eventsPage > 1 ? events.length : 0)} additional PRs/Issues`);
+            } catch (error) {
+              console.warn('Failed to fetch additional PRs/Issues:', error);
+            }
           } catch (error) {
             console.warn('Failed to fetch user events:', error);
           }
