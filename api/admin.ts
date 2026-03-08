@@ -1029,6 +1029,10 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
               bio: user.bio,
               avatar_url: user.avatar_url,
               html_url: user.html_url,
+              followers: user.followers,
+              following: user.following,
+              public_repos: user.public_repos,
+              created_at: user.created_at
             },
             debug: {
               contributionComparison,
@@ -1037,10 +1041,6 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
                 foundEmails: Array.from(commitEmailsFound),
                 matchedEmails: Array.from(commitEmailsFound).filter(e => expectedEmails.map(e => e.toLowerCase()).includes(e.toLowerCase()))
               } : null
-              followers: user.followers,
-              following: user.following,
-              public_repos: user.public_repos,
-              created_at: user.created_at
             },
           timestamp: new Date().toISOString()
         });
