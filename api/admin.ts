@@ -608,7 +608,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
                       private: isPrivate,
                       owner: repoOwner,
                       original_name: repoName, // Keep original name for reference
-                      original_full_name: repoFullName // Keep original full_name for reference
+                      original_full_name: repoFullNameOriginal // Keep original full_name for reference
                     },
                     created_at: commit.author?.date || commit.committer?.date,
                     payload: {
@@ -695,7 +695,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
               earliest: events[events.length - 1]?.created_at,
               latest: events[0]?.created_at
             } : 'No events',
-            uniqueRepos: [...new Set(events.map((e: any) => e.repo?.full_name || e.repo?.name)).filter(Boolean)].length,
+            uniqueRepos: [...new Set(events.map((e: any) => e.repo?.full_name || e.repo?.name).filter(Boolean))].length,
             sampleEvents: events.slice(0, 3).map((e: any) => ({
               type: e.type,
               repo: e.repo?.full_name || e.repo?.name,
