@@ -806,7 +806,22 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
           });
           
           // Log comparison with GitHub's contribution count
-          console.log(`📊 Contribution Comparison:`);
+          const contributionComparison = {
+            commitsFetched: commitEvents.length,
+            maxCommitsLimit: 1000,
+            totalEventsFetched: events.length,
+            contributionsCounted: totalContributions,
+            githubShows: 2605,
+            difference: 2605 - totalContributions,
+            eventTypeBreakdown: eventTypeCounts,
+            notes: [
+              'Private repo contributions (not in public events)',
+              'Search API limit of 1,000 commits',
+              'Events outside the last year date range'
+            ]
+          };
+          
+          console.log(`📊 Contribution Comparison:`, JSON.stringify(contributionComparison, null, 2));
           console.log(`   - Commits fetched: ${commitEvents.length} (max 1,000 due to GitHub Search API limit)`);
           console.log(`   - Total events fetched: ${events.length}`);
           console.log(`   - Contributions counted (PushEvent + PR + Issues + Reviews): ${totalContributions}`);
@@ -837,6 +852,14 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
               bio: user.bio,
               avatar_url: user.avatar_url,
               html_url: user.html_url,
+            },
+            debug: {
+              contributionComparison,
+              emailVerification: expectedEmails.length > 0 ? {
+                expectedEmails,
+                foundEmails: Array.from(commitEmailsFound),
+                matchedEmails: Array.from(commitEmailsFound).filter(e => expectedEmails.map(e => e.toLowerCase()).includes(e.toLowerCase()))
+              } : null
               followers: user.followers,
               following: user.following,
               public_repos: user.public_repos,
