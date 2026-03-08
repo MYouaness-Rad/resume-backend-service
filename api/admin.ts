@@ -357,6 +357,13 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
             });
           }
 
+          // Parse emails parameter (optional - GitHub Search API with author:username automatically includes all emails)
+          const emailsParam = req.query?.emails as string;
+          const expectedEmails = emailsParam ? emailsParam.split(',').map(e => e.trim()).filter(Boolean) : [];
+          if (expectedEmails.length > 0) {
+            console.log(`📧 Expected emails for ${username}:`, expectedEmails);
+          }
+
           // Fetch user repos (including private)
           // First try to get authenticated user's repos (includes private)
           let reposResponse;
@@ -515,10 +522,14 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
           const commitEvents: any[] = [];
           const existingShas = new Set<string>(); // Track all commit SHAs to avoid duplicates
           const repoDisplayNameMap = new Map<string, { name: string; full_name: string }>(); // Map original repo names to display names
+          const commitEmailsFound = new Set<string>(); // Track which emails are found in commits (for verification)
           
           try {
             // Build search query: author:username author-date:>YYYY-MM-DD
-            // This will find all commits by the user regardless of which email they used
+            // IMPORTANT: Using `author:username` (not `author-email:email`) automatically includes
+            // ALL commits from ALL emails associated with this GitHub account.
+            // GitHub links all emails to the account, so searching by username captures everything.
+            // The emails parameter is optional and used only for verification/logging purposes.
             const searchQuery = `author:${username} author-date:>${sinceDateStr}`;
             
             let page = 1;
@@ -548,6 +559,14 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
                   if (existingShas.has(sha)) return;
 
                   existingShas.add(sha);
+                  
+                  // Track commit author email for verification
+                  if (commit.author?.email) {
+                    commitEmailsFound.add(commit.author.email.toLowerCase());
+                  }
+                  if (commit.committer?.email) {
+                    commitEmailsFound.add(commit.committer.email.toLowerCase());
+                  }
                   
                   // Extract repository info from the search result
                   // GitHub Search API returns repository object with full_name
@@ -638,6 +657,26 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
             
             console.log(`✅ Fetched ${commitEvents.length} commits via Search API`);
             console.log(`📊 Repo display name mapping:`, Array.from(repoDisplayNameMap.entries()).slice(0, 10));
+            
+            // Verify emails: Check if commits from expected emails are found
+            if (expectedEmails.length > 0) {
+              const foundEmails = Array.from(commitEmailsFound);
+              const expectedEmailsLower = expectedEmails.map(e => e.toLowerCase());
+              const matchedEmails = foundEmails.filter(e => expectedEmailsLower.includes(e));
+              const unmatchedExpected = expectedEmailsLower.filter(e => !foundEmails.includes(e));
+              
+              console.log(`📧 Email Verification:`);
+              console.log(`   - Expected emails: ${expectedEmails.join(', ')}`);
+              console.log(`   - Found emails in commits: ${foundEmails.length > 0 ? foundEmails.join(', ') : 'None found'}`);
+              console.log(`   - Matched emails: ${matchedEmails.length > 0 ? matchedEmails.join(', ') : 'None'}`);
+              if (unmatchedExpected.length > 0) {
+                console.log(`   ⚠️  Unmatched expected emails: ${unmatchedExpected.join(', ')} (may not have commits in date range)`);
+              }
+              console.log(`   ✅ Total unique commit emails found: ${foundEmails.length}`);
+            } else {
+              console.log(`📧 Commit author emails found: ${Array.from(commitEmailsFound).join(', ') || 'None'}`);
+            }
+            
             console.log(`🔍 Sample commit events (first 5):`, commitEvents.slice(0, 5).map(e => ({
               repo: e.repo?.full_name,
               name: e.repo?.name,
