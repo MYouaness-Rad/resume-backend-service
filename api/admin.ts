@@ -402,8 +402,9 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
           const user = userResponse.data;
 
           // Process repos with additional data
+          // Reduced from 100 to 30 repos to stay within 10-second timeout limit
           const reposWithCommits = await Promise.all(
-            repos.slice(0, 100).map(async (repo: any) => {
+            repos.slice(0, 30).map(async (repo: any) => {
               try {
                 // Use the repo's owner from the API response, not the username parameter
                 // This handles cases where username might differ from repo owner
@@ -495,7 +496,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
             // GitHub API returns events in reverse chronological order
             let eventsPage = 1;
             let hasMoreEvents = true;
-            const maxEventPages = 30; // Up to 3,000 events (30 pages * 100 per page)
+            const maxEventPages = 3; // Up to 300 events (3 pages * 100 per page) - very aggressive reduction for 10s timeout limit
             
             while (hasMoreEvents && eventsPage <= maxEventPages) {
               try {
@@ -544,8 +545,8 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
                   hasMoreEvents = false;
                 } else {
                   eventsPage++;
-                  // Small delay to avoid rate limits
-                  await new Promise(resolve => setTimeout(resolve, 100));
+                  // Reduced delay to stay within timeout limit
+                  await new Promise(resolve => setTimeout(resolve, 50));
                 }
               } catch (pageErr: any) {
                 console.warn(`Failed to fetch events page ${eventsPage}:`, pageErr?.message || pageErr);
@@ -555,59 +556,17 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
             
             console.log(`✅ Fetched ${events.length} public events (pages ${eventsPage - 1})`);
             
-            // Also fetch PRs, Issues, and Reviews separately for public repos
-            // This helps capture contributions that might not appear in public events
+            // SKIPPED: Fetching PRs separately - events API should cover most contributions
+            // This was removed to stay within 10-second timeout limit on Vercel Hobby plan
+            /*
             try {
               console.log(`🔍 Fetching PRs, Issues, and Reviews for public repos...`);
-              const publicRepos = reposWithCommits.filter((r: any) => r.visibility === 'public').slice(0, 20); // Limit to avoid rate limits
-              
-              for (const repo of publicRepos) {
-                try {
-                  // Fetch PRs
-                  const prsResponse = await githubStorage.octokit.pulls.list({
-                    owner: repo.owner || username,
-                    repo: repo.name,
-                    state: 'all',
-                    per_page: 100,
-                    sort: 'updated',
-                    direction: 'desc'
-                  });
-                  
-                  // Filter PRs by author and date
-                  const relevantPRs = prsResponse.data
-                    .filter((pr: any) => {
-                      const prDate = new Date(pr.created_at);
-                      return pr.user?.login === username && prDate >= eventsSinceDate;
-                    })
-                    .map((pr: any) => ({
-                      type: 'PullRequestEvent',
-                      id: `pr-${pr.id}`,
-                      created_at: pr.created_at,
-                      repo: {
-                        name: repo.name,
-                        full_name: repo.full_name,
-                        owner: repo.owner
-                      },
-                      payload: {
-                        action: pr.state === 'closed' && pr.merged_at ? 'closed' : pr.state,
-                        pull_request: pr
-                      }
-                    }));
-                  
-                  events.push(...relevantPRs);
-                  
-                  // Small delay to avoid rate limits
-                  await new Promise(resolve => setTimeout(resolve, 200));
-                } catch (repoErr: any) {
-                  // Skip repos that fail (might be private or deleted)
-                  continue;
-                }
-              }
-              
-              console.log(`✅ Added ${events.length - (eventsPage > 1 ? events.length : 0)} additional PRs/Issues`);
+              const publicRepos = reposWithCommits.filter((r: any) => r.visibility === 'public').slice(0, 5);
+              // ... PR fetching code removed for performance ...
             } catch (error) {
               console.warn('Failed to fetch additional PRs/Issues:', error);
             }
+            */
           } catch (error) {
             console.warn('Failed to fetch user events:', error);
           }
@@ -636,8 +595,8 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
             let page = 1;
             let hasMore = true;
             // GitHub Search API has a hard limit of 1,000 results total
-            // We'll fetch all 10 pages to get the maximum possible commits
-            const maxPages = 10; // GitHub Search API returns up to 1000 results (10 pages * 100 per page)
+            // Reduced pages to stay within 10-second timeout limit
+            const maxPages = 3; // Reduced to 3 pages (300 commits max) for aggressive timeout optimization
             console.log(`🔍 Searching commits with query: ${searchQuery} (max ${maxPages} pages = ${maxPages * 100} commits)`);
             
             while (hasMore && page <= maxPages) {
@@ -749,9 +708,9 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
                 hasMore = searchResponse.data.items.length === 100 && page < maxPages;
                 page++;
                 
-                // Small delay to avoid rate limits (Search API has stricter rate limits)
+                // Reduced delay to stay within timeout limit
                 if (hasMore) {
-                  await new Promise(resolve => setTimeout(resolve, 200));
+                  await new Promise(resolve => setTimeout(resolve, 50));
                 }
               } catch (pageErr: any) {
                 console.warn(`Failed to fetch commits page ${page} via search API:`, pageErr?.message || pageErr);
@@ -769,9 +728,10 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
               let additionalCommits = 0;
               
               // Fetch from top repos (sorted by commit count)
+              // Reduced significantly to stay within 10-second timeout limit
               const reposToFetch = reposWithCommits
                 .sort((a: any, b: any) => b.commits_count - a.commits_count)
-                .slice(0, 50); // Top 50 repos
+                .slice(0, 3); // Top 3 repos only - very aggressive reduction for timeout
               
               for (const repo of reposToFetch) {
                 try {
@@ -782,7 +742,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
                   // Fetch commits with date filter
                   let repoPage = 1;
                   let hasMoreRepoCommits = true;
-                  const maxRepoPages = 10; // Up to 1,000 commits per repo
+                  const maxRepoPages = 1; // Up to 100 commits per repo - very aggressive reduction for timeout
                   
                   while (hasMoreRepoCommits && repoPage <= maxRepoPages) {
                     try {
@@ -864,7 +824,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
                         hasMoreRepoCommits = false;
                       } else {
                         repoPage++;
-                        await new Promise(resolve => setTimeout(resolve, 100)); // Rate limit delay
+                        await new Promise(resolve => setTimeout(resolve, 50)); // Reduced delay
                       }
                     } catch (repoPageErr: any) {
                       console.warn(`Failed to fetch commits from ${repoFullName} page ${repoPage}:`, repoPageErr?.message);
@@ -872,7 +832,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
                     }
                   }
                   
-                  await new Promise(resolve => setTimeout(resolve, 200)); // Delay between repos
+                  await new Promise(resolve => setTimeout(resolve, 50)); // Reduced delay between repos
                 } catch (repoErr: any) {
                   // Skip repos that fail (might be deleted or inaccessible)
                   continue;
