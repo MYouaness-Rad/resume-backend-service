@@ -480,28 +480,75 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
 
           const topRepos = reposWithCommits.sort((a, b) => b.commits_count - a.commits_count).slice(0, 12);
 
-          // Fetch user events (commits, PRs, reviews, issues)
+          // Fetch user events (commits, PRs, reviews, issues) for the full year
+          // GitHub's contribution graph counts: commits, PRs, issues opened, PR reviews
           let events: any[] = [];
+          const eventsSinceDate = new Date(sinceDateStr); // Use same date range as commits
+          
           try {
-            // Fetch public events (last 30 days, up to 300 events)
-            const eventsResponse = await githubStorage.octokit.activity.listPublicEventsForUser({
-              username: username,
-              per_page: 100
-            });
-            // Normalize events: GitHub API returns repo.name as "owner/repo", convert to repo.full_name
-            events = eventsResponse.data.map((event: any) => {
-              if (event.repo && event.repo.name && !event.repo.full_name) {
-                // GitHub API returns repo.name as "owner/repo" format
-                event.repo.full_name = event.repo.name;
-                // Extract repo name from "owner/repo"
-                const parts = event.repo.name.split('/');
-                if (parts.length === 2) {
-                  event.repo.name = parts[1];
-                  event.repo.owner = parts[0];
+            // Paginate through all public events to get full year of data
+            // GitHub API returns events in reverse chronological order
+            let eventsPage = 1;
+            let hasMoreEvents = true;
+            const maxEventPages = 30; // Up to 3,000 events (30 pages * 100 per page)
+            
+            while (hasMoreEvents && eventsPage <= maxEventPages) {
+              try {
+                const eventsResponse = await githubStorage.octokit.activity.listPublicEventsForUser({
+                  username: username,
+                  per_page: 100,
+                  page: eventsPage
+                });
+                
+                if (!eventsResponse.data || eventsResponse.data.length === 0) {
+                  hasMoreEvents = false;
+                  break;
                 }
+                
+                // Filter events by date (only include events from the last year)
+                const filteredEvents = eventsResponse.data.filter((event: any) => {
+                  if (!event.created_at) return false;
+                  const eventDate = new Date(event.created_at);
+                  return eventDate >= eventsSinceDate;
+                });
+                
+                // If we got events older than our date range, we can stop paginating
+                if (filteredEvents.length < eventsResponse.data.length) {
+                  hasMoreEvents = false;
+                }
+                
+                // Normalize events: GitHub API returns repo.name as "owner/repo", convert to repo.full_name
+                const normalizedEvents = filteredEvents.map((event: any) => {
+                  if (event.repo && event.repo.name && !event.repo.full_name) {
+                    // GitHub API returns repo.name as "owner/repo" format
+                    event.repo.full_name = event.repo.name;
+                    // Extract repo name from "owner/repo"
+                    const parts = event.repo.name.split('/');
+                    if (parts.length === 2) {
+                      event.repo.name = parts[1];
+                      event.repo.owner = parts[0];
+                    }
+                  }
+                  return event;
+                });
+                
+                events.push(...normalizedEvents);
+                
+                // If we got fewer than 100 events, we've reached the end
+                if (eventsResponse.data.length < 100) {
+                  hasMoreEvents = false;
+                } else {
+                  eventsPage++;
+                  // Small delay to avoid rate limits
+                  await new Promise(resolve => setTimeout(resolve, 100));
+                }
+              } catch (pageErr: any) {
+                console.warn(`Failed to fetch events page ${eventsPage}:`, pageErr?.message || pageErr);
+                hasMoreEvents = false;
               }
-              return event;
-            });
+            }
+            
+            console.log(`✅ Fetched ${events.length} public events (pages ${eventsPage - 1})`);
           } catch (error) {
             console.warn('Failed to fetch user events:', error);
           }
@@ -534,7 +581,10 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
             
             let page = 1;
             let hasMore = true;
+            // GitHub Search API has a hard limit of 1,000 results total
+            // We'll fetch all 10 pages to get the maximum possible commits
             const maxPages = 10; // GitHub Search API returns up to 1000 results (10 pages * 100 per page)
+            console.log(`🔍 Searching commits with query: ${searchQuery} (max ${maxPages} pages = ${maxPages * 100} commits)`);
             
             while (hasMore && page <= maxPages) {
               try {
@@ -726,10 +776,23 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
             new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
           );
 
+          // Count different event types for better visibility
+          const eventTypeCounts: Record<string, number> = {};
+          events.forEach((e: any) => {
+            eventTypeCounts[e.type] = (eventTypeCounts[e.type] || 0) + 1;
+          });
+          
+          // Count total contributions (commits + PRs + issues + reviews)
+          // GitHub counts: PushEvent commits, PullRequestEvent, IssuesEvent, PullRequestReviewEvent
+          const contributionTypes = ['PushEvent', 'PullRequestEvent', 'IssuesEvent', 'PullRequestReviewEvent'];
+          const totalContributions = events.filter((e: any) => contributionTypes.includes(e.type)).length;
+          
           console.log(`✅ GitHub Activity API Response:`, {
             totalRepos: reposWithCommits.length,
             totalEvents: events.length,
             totalCommits: commitEvents.length,
+            totalContributions: totalContributions, // Commits + PRs + Issues + Reviews
+            eventTypeBreakdown: eventTypeCounts,
             dateRange: events.length > 0 ? {
               earliest: events[events.length - 1]?.created_at,
               latest: events[0]?.created_at
@@ -741,6 +804,16 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
               hasRepo: !!e.repo
             }))
           });
+          
+          // Log comparison with GitHub's contribution count
+          console.log(`📊 Contribution Comparison:`);
+          console.log(`   - Commits fetched: ${commitEvents.length} (max 1,000 due to GitHub Search API limit)`);
+          console.log(`   - Total events fetched: ${events.length}`);
+          console.log(`   - Contributions counted (PushEvent + PR + Issues + Reviews): ${totalContributions}`);
+          console.log(`   - Note: GitHub shows ~2,605 contributions. Difference may be due to:`);
+          console.log(`     * Private repo contributions (not in public events)`);
+          console.log(`     * Search API limit of 1,000 commits`);
+          console.log(`     * Events outside the last year date range`);
 
         return res.status(200).json({
           success: true,
