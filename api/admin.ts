@@ -583,7 +583,10 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
 
         return res.status(200).json({
           success: true,
-            repos: topRepos,
+            repos: topRepos.map((r: any) => ({
+              ...r,
+              full_name: `${username}/${r.name}`
+            })),
             events: events,
             stats: {
               totalRepos: user.public_repos + (user.total_private_repos || 0),
