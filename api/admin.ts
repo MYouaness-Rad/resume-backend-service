@@ -396,10 +396,15 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
 
           // Process repos with additional data
           const reposWithCommits = await Promise.all(
-            repos.slice(0, 20).map(async (repo: any) => {
+            repos.slice(0, 100).map(async (repo: any) => {
               try {
+                // Use the repo's owner from the API response, not the username parameter
+                // This handles cases where username might differ from repo owner
+                const repoOwner = repo.owner?.login || username;
+                const repoFullName = repo.full_name || `${repoOwner}/${repo.name}`;
+                
                 const commitsResponse = await githubStorage.octokit.repos.listCommits({
-                  owner: username,
+                  owner: repoOwner,
                   repo: repo.name,
                   per_page: 1
                 });
@@ -413,6 +418,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
 
                 return {
                   name: repo.name,
+                  full_name: repoFullName,
                   html_url: repo.html_url,
                   description: repo.description,
                   language: repo.language,
@@ -422,12 +428,16 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
                   updated_at: repo.updated_at,
                   size: repo.size,
                   topics: repo.topics || [],
-                  visibility: repo.private ? 'private' : 'public'
+                  visibility: repo.private ? 'private' : 'public',
+                  owner: repoOwner
                 };
               } catch (err) {
                 console.warn(`Failed to fetch commits for ${repo.name}:`, err);
+                const repoOwner = repo.owner?.login || username;
+                const repoFullName = repo.full_name || `${repoOwner}/${repo.name}`;
                 return {
                   name: repo.name,
+                  full_name: repoFullName,
                   html_url: repo.html_url,
                   description: repo.description,
                   language: repo.language,
@@ -437,7 +447,8 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
                   updated_at: repo.updated_at,
                   size: repo.size,
                   topics: repo.topics || [],
-                  visibility: repo.private ? 'private' : 'public'
+                  visibility: repo.private ? 'private' : 'public',
+                  owner: repoOwner
                 };
               }
             })
@@ -477,84 +488,161 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
 
           // Also fetch commits from repositories for more historical data
           const emails = req.query?.emails as string | string[] | undefined;
-          const emailList = emails ? (Array.isArray(emails) ? emails : [emails]) : [];
+          const emailList = emails ? (Array.isArray(emails) ? emails : emails.split(',').map(e => e.trim()).filter(Boolean)) : [];
           
-          // Fetch commits from top repos with email filtering
+          console.log(`📊 Fetching GitHub activity for ${username}`, {
+            totalRepos: reposWithCommits.length,
+            emailList: emailList.length > 0 ? emailList : 'none',
+            dateRange: `Last year (since ${sinceISO})`
+          });
+          
+          // Fetch commits from ALL repos (not just top 10) to get full contribution history
           const commitEvents: any[] = [];
-          for (const repo of topRepos.slice(0, 10)) {
+          const existingShas = new Set<string>(); // Track all commit SHAs to avoid duplicates
+          
+          // Calculate date range: last year (matching GitHub's contribution graph)
+          const since = new Date();
+          since.setFullYear(since.getFullYear() - 1);
+          const sinceISO = since.toISOString();
+          
+          // Fetch commits from all repos, not just top 10
+          // Process repos in batches to avoid rate limits
+          const reposToProcess = reposWithCommits; // Process all repos
+          
+          for (const repo of reposToProcess) {
             try {
-              const since = new Date();
-              since.setFullYear(since.getFullYear() - 1);
+              // Use the repo's owner, not the username parameter
+              const repoOwner = repo.owner || username;
+              const repoFullName = repo.full_name || `${repoOwner}/${repo.name}`;
               
-              // Fetch commits by username
-              const commitsResponse = await githubStorage.octokit.repos.listCommits({
-                owner: username,
-                repo: repo.name,
-                author: username,
-                since: since.toISOString(),
-                per_page: 100
-              });
-
-              commitsResponse.data.forEach((commit: any) => {
-                // Filter by email if emails are provided
-                if (emailList.length > 0) {
-                  const commitEmail = commit.commit.author?.email?.toLowerCase() || '';
-                  const matchesEmail = emailList.some(email => commitEmail === email.toLowerCase());
-                  if (!matchesEmail) return;
-                }
-
-                commitEvents.push({
-                  type: 'PushEvent',
-                  repo: {
-                    name: repo.name,
-                    full_name: `${username}/${repo.name}`
-                  },
-                  created_at: commit.commit.author.date,
-                  payload: {
-                    commits: [{
-                      sha: commit.sha,
-                      message: commit.commit.message,
-                      author: commit.commit.author
-                    }]
-                  }
-                });
-              });
-
-              // Also fetch commits by each email address
-              for (const email of emailList) {
+              // Fetch commits by username with pagination
+              let page = 1;
+              let hasMore = true;
+              
+              while (hasMore && page <= 10) { // Limit to 10 pages per repo (1000 commits max)
                 try {
-                  const emailCommitsResponse = await githubStorage.octokit.repos.listCommits({
-                    owner: username,
+                  const commitsResponse = await githubStorage.octokit.repos.listCommits({
+                    owner: repoOwner,
                     repo: repo.name,
-                    author: email,
-                    since: since.toISOString(),
-                    per_page: 100
+                    author: username,
+                    since: sinceISO,
+                    per_page: 100,
+                    page: page
                   });
 
-                  const existingShas = new Set(commitEvents.map((e: any) => e.payload.commits[0].sha));
-                  emailCommitsResponse.data.forEach((commit: any) => {
-                    if (!existingShas.has(commit.sha)) {
-                      commitEvents.push({
-                        type: 'PushEvent',
-                        repo: {
-                          name: repo.name,
-                          full_name: `${username}/${repo.name}`
-                        },
-                        created_at: commit.commit.author.date,
-                        payload: {
-                          commits: [{
-                            sha: commit.sha,
-                            message: commit.commit.message,
-                            author: commit.commit.author
-                          }]
+                  if (commitsResponse.data.length === 0) {
+                    hasMore = false;
+                    break;
+                  }
+
+                  commitsResponse.data.forEach((commit: any) => {
+                    // Skip if we've already seen this commit
+                    if (existingShas.has(commit.sha)) return;
+                    
+                    // Filter by email if emails are provided
+                    if (emailList.length > 0) {
+                      const commitEmail = commit.commit.author?.email?.toLowerCase() || '';
+                      const matchesEmail = emailList.some(email => email.toLowerCase() === commitEmail);
+                      if (!matchesEmail) return;
+                    }
+
+                    existingShas.add(commit.sha);
+                    commitEvents.push({
+                      type: 'PushEvent',
+                      repo: {
+                        name: repo.name,
+                        full_name: repoFullName
+                      },
+                      created_at: commit.commit.author.date,
+                      payload: {
+                        commits: [{
+                          sha: commit.sha,
+                          message: commit.commit.message,
+                          author: commit.commit.author
+                        }]
+                      }
+                    });
+                  });
+
+                  // Check if there are more pages
+                  const linkHeader = commitsResponse.headers.link;
+                  hasMore = linkHeader?.includes('rel="next"') || false;
+                  page++;
+                  
+                  // Small delay to avoid rate limits
+                  if (hasMore) {
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                  }
+                } catch (pageErr) {
+                  console.warn(`Failed to fetch commits page ${page} from ${repo.name}:`, pageErr);
+                  hasMore = false;
+                }
+              }
+
+              // Also fetch commits by each email address (with pagination)
+              for (const email of emailList) {
+                if (!email || !email.trim()) continue;
+                
+                try {
+                  let emailPage = 1;
+                  let emailHasMore = true;
+                  
+                  while (emailHasMore && emailPage <= 10) {
+                    try {
+                      const emailCommitsResponse = await githubStorage.octokit.repos.listCommits({
+                        owner: repoOwner,
+                        repo: repo.name,
+                        author: email.trim(),
+                        since: sinceISO,
+                        per_page: 100,
+                        page: emailPage
+                      });
+
+                      if (emailCommitsResponse.data.length === 0) {
+                        emailHasMore = false;
+                        break;
+                      }
+
+                      emailCommitsResponse.data.forEach((commit: any) => {
+                        if (!existingShas.has(commit.sha)) {
+                          existingShas.add(commit.sha);
+                          commitEvents.push({
+                            type: 'PushEvent',
+                            repo: {
+                              name: repo.name,
+                              full_name: repoFullName
+                            },
+                            created_at: commit.commit.author.date,
+                            payload: {
+                              commits: [{
+                                sha: commit.sha,
+                                message: commit.commit.message,
+                                author: commit.commit.author
+                              }]
+                            }
+                          });
                         }
                       });
+
+                      const linkHeader = emailCommitsResponse.headers.link;
+                      emailHasMore = linkHeader?.includes('rel="next"') || false;
+                      emailPage++;
+                      
+                      if (emailHasMore) {
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                      }
+                    } catch (emailPageErr) {
+                      console.warn(`Failed to fetch commits page ${emailPage} by email ${email} from ${repo.name}:`, emailPageErr);
+                      emailHasMore = false;
                     }
-                  });
+                  }
                 } catch (err) {
                   console.warn(`Failed to fetch commits by email ${email} from ${repo.name}:`, err);
                 }
               }
+              
+              // Small delay between repos to avoid rate limits
+              await new Promise(resolve => setTimeout(resolve, 200));
             } catch (err) {
               console.warn(`Failed to fetch commits from ${repo.name}:`, err);
             }
@@ -581,11 +669,22 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
             new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
           );
 
+          console.log(`✅ GitHub Activity API Response:`, {
+            totalRepos: reposWithCommits.length,
+            totalEvents: events.length,
+            totalCommits: commitEvents.length,
+            dateRange: events.length > 0 ? {
+              earliest: events[events.length - 1]?.created_at,
+              latest: events[0]?.created_at
+            } : 'No events',
+            uniqueRepos: [...new Set(events.map((e: any) => e.repo?.full_name))].length
+          });
+
         return res.status(200).json({
           success: true,
-            repos: topRepos.map((r: any) => ({
+            repos: reposWithCommits.map((r: any) => ({
               ...r,
-              full_name: `${username}/${r.name}`
+              full_name: r.full_name || `${r.owner || username}/${r.name}`
             })),
             events: events,
             stats: {
