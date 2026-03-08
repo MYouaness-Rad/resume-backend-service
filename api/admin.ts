@@ -462,30 +462,148 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
 
           const topRepos = reposWithCommits.sort((a, b) => b.commits_count - a.commits_count).slice(0, 12);
 
+          // Fetch user events (commits, PRs, reviews, issues)
+          let events: any[] = [];
+          try {
+            // Fetch public events (last 30 days, up to 300 events)
+            const eventsResponse = await githubStorage.octokit.activity.listPublicEventsForUser({
+              username: username,
+              per_page: 100
+            });
+            events = eventsResponse.data;
+          } catch (error) {
+            console.warn('Failed to fetch user events:', error);
+          }
+
+          // Also fetch commits from repositories for more historical data
+          const emails = req.query?.emails as string | string[] | undefined;
+          const emailList = emails ? (Array.isArray(emails) ? emails : [emails]) : [];
+          
+          // Fetch commits from top repos with email filtering
+          const commitEvents: any[] = [];
+          for (const repo of topRepos.slice(0, 10)) {
+            try {
+              const since = new Date();
+              since.setFullYear(since.getFullYear() - 1);
+              
+              // Fetch commits by username
+              const commitsResponse = await githubStorage.octokit.repos.listCommits({
+                owner: username,
+                repo: repo.name,
+                author: username,
+                since: since.toISOString(),
+                per_page: 100
+              });
+
+              commitsResponse.data.forEach((commit: any) => {
+                // Filter by email if emails are provided
+                if (emailList.length > 0) {
+                  const commitEmail = commit.commit.author?.email?.toLowerCase() || '';
+                  const matchesEmail = emailList.some(email => commitEmail === email.toLowerCase());
+                  if (!matchesEmail) return;
+                }
+
+                commitEvents.push({
+                  type: 'PushEvent',
+                  repo: {
+                    name: repo.name,
+                    full_name: `${username}/${repo.name}`
+                  },
+                  created_at: commit.commit.author.date,
+                  payload: {
+                    commits: [{
+                      sha: commit.sha,
+                      message: commit.commit.message,
+                      author: commit.commit.author
+                    }]
+                  }
+                });
+              });
+
+              // Also fetch commits by each email address
+              for (const email of emailList) {
+                try {
+                  const emailCommitsResponse = await githubStorage.octokit.repos.listCommits({
+                    owner: username,
+                    repo: repo.name,
+                    author: email,
+                    since: since.toISOString(),
+                    per_page: 100
+                  });
+
+                  const existingShas = new Set(commitEvents.map((e: any) => e.payload.commits[0].sha));
+                  emailCommitsResponse.data.forEach((commit: any) => {
+                    if (!existingShas.has(commit.sha)) {
+                      commitEvents.push({
+                        type: 'PushEvent',
+                        repo: {
+                          name: repo.name,
+                          full_name: `${username}/${repo.name}`
+                        },
+                        created_at: commit.commit.author.date,
+                        payload: {
+                          commits: [{
+                            sha: commit.sha,
+                            message: commit.commit.message,
+                            author: commit.commit.author
+                          }]
+                        }
+                      });
+                    }
+                  });
+                } catch (err) {
+                  console.warn(`Failed to fetch commits by email ${email} from ${repo.name}:`, err);
+                }
+              }
+            } catch (err) {
+              console.warn(`Failed to fetch commits from ${repo.name}:`, err);
+            }
+          }
+
+          // Merge commit events with other events, avoiding duplicates
+          const existingEventKeys = new Set(events.map((e: any) => {
+            const date = e.created_at?.split('T')[0];
+            const repo = e.repo?.full_name;
+            return `${date}-${repo}`;
+          }));
+
+          commitEvents.forEach((commitEvent: any) => {
+            const date = commitEvent.created_at?.split('T')[0];
+            const repo = commitEvent.repo?.full_name;
+            const key = `${date}-${repo}`;
+            if (!existingEventKeys.has(key)) {
+              events.push(commitEvent);
+            }
+          });
+
+          // Sort events by date (newest first)
+          events.sort((a: any, b: any) => 
+            new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
+          );
+
         return res.status(200).json({
           success: true,
-            data: {
-              repos: topRepos,
-              stats: {
-                totalRepos: user.public_repos + (user.total_private_repos || 0),
-                totalStars,
-                totalForks,
-                totalCommits,
-                languages,
-                privateRepos,
-                publicRepos
-              },
-              user: {
-                login: user.login,
-                name: user.name,
-                bio: user.bio,
-                avatar_url: user.avatar_url,
-                html_url: user.html_url,
-                followers: user.followers,
-                following: user.following,
-                public_repos: user.public_repos,
-                created_at: user.created_at
-              }
+            repos: topRepos,
+            events: events,
+            stats: {
+              totalRepos: user.public_repos + (user.total_private_repos || 0),
+              totalStars,
+              totalForks,
+              totalCommits,
+              languages,
+              privateRepos,
+              publicRepos
+            },
+            user: {
+              login: user.login,
+              name: user.name,
+              bio: user.bio,
+              avatar_url: user.avatar_url,
+              html_url: user.html_url,
+              followers: user.followers,
+              following: user.following,
+              public_repos: user.public_repos,
+              created_at: user.created_at
             },
           timestamp: new Date().toISOString()
         });
