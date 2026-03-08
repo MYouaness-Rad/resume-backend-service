@@ -481,7 +481,20 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
               username: username,
               per_page: 100
             });
-            events = eventsResponse.data;
+            // Normalize events: GitHub API returns repo.name as "owner/repo", convert to repo.full_name
+            events = eventsResponse.data.map((event: any) => {
+              if (event.repo && event.repo.name && !event.repo.full_name) {
+                // GitHub API returns repo.name as "owner/repo" format
+                event.repo.full_name = event.repo.name;
+                // Extract repo name from "owner/repo"
+                const parts = event.repo.name.split('/');
+                if (parts.length === 2) {
+                  event.repo.name = parts[1];
+                  event.repo.owner = parts[0];
+                }
+              }
+              return event;
+            });
           } catch (error) {
             console.warn('Failed to fetch user events:', error);
           }
@@ -636,15 +649,33 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
           }
 
           // Merge commit events with other events, avoiding duplicates
+          // Normalize repo.full_name for all events (handle both formats)
+          events = events.map((e: any) => {
+            if (e.repo && !e.repo.full_name) {
+              // If full_name is missing, try to construct it
+              if (e.repo.name && e.repo.name.includes('/')) {
+                e.repo.full_name = e.repo.name;
+                const parts = e.repo.name.split('/');
+                if (parts.length === 2) {
+                  e.repo.name = parts[1];
+                  e.repo.owner = parts[0];
+                }
+              } else if (e.repo.owner && e.repo.name) {
+                e.repo.full_name = `${e.repo.owner}/${e.repo.name}`;
+              }
+            }
+            return e;
+          });
+          
           const existingEventKeys = new Set(events.map((e: any) => {
             const date = e.created_at?.split('T')[0];
-            const repo = e.repo?.full_name;
+            const repo = e.repo?.full_name || e.repo?.name;
             return `${date}-${repo}`;
           }));
 
           commitEvents.forEach((commitEvent: any) => {
             const date = commitEvent.created_at?.split('T')[0];
-            const repo = commitEvent.repo?.full_name;
+            const repo = commitEvent.repo?.full_name || commitEvent.repo?.name || 'unknown';
             const key = `${date}-${repo}`;
             if (!existingEventKeys.has(key)) {
               events.push(commitEvent);
@@ -664,7 +695,12 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
               earliest: events[events.length - 1]?.created_at,
               latest: events[0]?.created_at
             } : 'No events',
-            uniqueRepos: [...new Set(events.map((e: any) => e.repo?.full_name))].length
+            uniqueRepos: [...new Set(events.map((e: any) => e.repo?.full_name || e.repo?.name)).filter(Boolean)].length,
+            sampleEvents: events.slice(0, 3).map((e: any) => ({
+              type: e.type,
+              repo: e.repo?.full_name || e.repo?.name,
+              hasRepo: !!e.repo
+            }))
           });
 
         return res.status(200).json({
