@@ -501,6 +501,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
           // This automatically includes all commits from all emails associated with the account
           const commitEvents: any[] = [];
           const existingShas = new Set<string>(); // Track all commit SHAs to avoid duplicates
+          const repoDisplayNameMap = new Map<string, { name: string; full_name: string }>(); // Map original repo names to display names
           
           try {
             // Build search query: author:username author-date:>YYYY-MM-DD
@@ -538,17 +539,48 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
                   // Extract repository info from the search result
                   // GitHub Search API returns repository object with full_name
                   const repo = item.repository;
+                  const isPrivate = repo?.private === true;
+                  const repoOwner = repo?.owner?.login || username;
+                  const repoName = repo?.name || 'Unknown';
                   const repoFullName = repo?.full_name || 
-                                     (repo?.owner?.login && repo?.name ? `${repo.owner.login}/${repo.name}` : null) ||
-                                     repo?.name || 
+                                     (repoOwner && repoName ? `${repoOwner}/${repoName}` : null) ||
                                      'Unknown';
-                  const repoName = repoFullName.includes('/') ? repoFullName.split('/').pop() : repoFullName;
+                  
+                  // For private repos, use organization name if available, otherwise show "Private Repo"
+                  // Use cached display name if we've seen this repo before to ensure consistency
+                  let displayRepoName = repoName;
+                  let displayFullName = repoFullName;
+                  
+                  if (repoDisplayNameMap.has(repoFullName)) {
+                    // Use cached display name for consistency
+                    const cached = repoDisplayNameMap.get(repoFullName)!;
+                    displayRepoName = cached.name;
+                    displayFullName = cached.full_name;
+                  } else if (isPrivate) {
+                    // Check if it's an organization repo
+                    const isOrgRepo = repo?.owner?.type === 'Organization';
+                    if (isOrgRepo && repoOwner) {
+                      // Show organization name for private org repos
+                      displayRepoName = repoOwner;
+                      displayFullName = `${repoOwner}/[Private]`;
+                    } else {
+                      // Show "Private Repo" for private personal repos
+                      displayRepoName = 'Private Repo';
+                      displayFullName = `${repoOwner}/[Private]`;
+                    }
+                    // Cache the display name for this repo
+                    repoDisplayNameMap.set(repoFullName, { name: displayRepoName, full_name: displayFullName });
+                  }
                   
                   commitEvents.push({
                     type: 'PushEvent',
                     repo: {
-                      name: repoName || 'Unknown',
-                      full_name: repoFullName
+                      name: displayRepoName,
+                      full_name: displayFullName,
+                      private: isPrivate,
+                      owner: repoOwner,
+                      original_name: repoName, // Keep original name for reference
+                      original_full_name: repoFullName // Keep original full_name for reference
                     },
                     created_at: commit.author?.date || commit.committer?.date,
                     payload: {
