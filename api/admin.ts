@@ -759,7 +759,128 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
               }
             }
             
-            console.log(`✅ Fetched ${commitEvents.length} commits via Search API`);
+            console.log(`✅ Fetched ${commitEvents.length} commits via Search API (limit: 1,000)`);
+            
+            // Supplement with direct repo commits to bypass Search API limit
+            // Fetch commits directly from repos to get more than 1,000 commits
+            if (commitEvents.length >= 1000) {
+              console.log(`⚠️  Hit Search API limit (1,000). Fetching additional commits directly from repos...`);
+              const existingShasSet = new Set(existingShas); // Track SHAs we already have
+              let additionalCommits = 0;
+              
+              // Fetch from top repos (sorted by commit count)
+              const reposToFetch = reposWithCommits
+                .sort((a: any, b: any) => b.commits_count - a.commits_count)
+                .slice(0, 50); // Top 50 repos
+              
+              for (const repo of reposToFetch) {
+                try {
+                  const repoOwner = repo.owner || username;
+                  const repoName = repo.name;
+                  const repoFullName = repo.full_name || `${repoOwner}/${repoName}`;
+                  
+                  // Fetch commits with date filter
+                  let repoPage = 1;
+                  let hasMoreRepoCommits = true;
+                  const maxRepoPages = 10; // Up to 1,000 commits per repo
+                  
+                  while (hasMoreRepoCommits && repoPage <= maxRepoPages) {
+                    try {
+                      const repoCommitsResponse = await githubStorage.octokit.repos.listCommits({
+                        owner: repoOwner,
+                        repo: repoName,
+                        since: sinceDateStr,
+                        per_page: 100,
+                        page: repoPage
+                      });
+                      
+                      if (!repoCommitsResponse.data || repoCommitsResponse.data.length === 0) {
+                        hasMoreRepoCommits = false;
+                        break;
+                      }
+                      
+                      // Add commits we haven't seen yet
+                      for (const commit of repoCommitsResponse.data) {
+                        const sha = commit.sha;
+                        if (!existingShasSet.has(sha)) {
+                          existingShasSet.add(sha);
+                          additionalCommits++;
+                          
+                          // Track email
+                          if (commit.commit?.author?.email) {
+                            commitEmailsFound.add(commit.commit.author.email.toLowerCase());
+                          }
+                          if (commit.commit?.committer?.email) {
+                            commitEmailsFound.add(commit.commit.committer.email.toLowerCase());
+                          }
+                          
+                          // Determine if private
+                          const isPrivate = repo.visibility === 'private';
+                          const repoDisplayNameMapKey = repoFullName.toLowerCase();
+                          let displayRepoName = repoName;
+                          let displayFullName = repoFullName;
+                          
+                          if (repoDisplayNameMap.has(repoDisplayNameMapKey)) {
+                            const cached = repoDisplayNameMap.get(repoDisplayNameMapKey)!;
+                            displayRepoName = cached.name;
+                            displayFullName = cached.full_name;
+                          } else if (isPrivate) {
+                            const isOrgRepo = repoOwner.toLowerCase() !== username.toLowerCase();
+                            if (isOrgRepo) {
+                              displayRepoName = repoOwner;
+                              displayFullName = `${repoOwner}/[Private]`;
+                            } else {
+                              displayRepoName = 'Private Repo';
+                              displayFullName = `${repoOwner}/[Private]`;
+                            }
+                            repoDisplayNameMap.set(repoDisplayNameMapKey, { name: displayRepoName, full_name: displayFullName });
+                          }
+                          
+                          commitEvents.push({
+                            type: 'PushEvent',
+                            repo: {
+                              name: displayRepoName,
+                              full_name: displayFullName,
+                              private: isPrivate,
+                              owner: repoOwner,
+                              original_name: repoName,
+                              original_full_name: repoFullName
+                            },
+                            created_at: commit.commit.author?.date || commit.commit.committer?.date,
+                            payload: {
+                              commits: [{
+                                sha: sha,
+                                message: commit.commit.message,
+                                author: commit.commit.author
+                              }]
+                            }
+                          });
+                        }
+                      }
+                      
+                      if (repoCommitsResponse.data.length < 100) {
+                        hasMoreRepoCommits = false;
+                      } else {
+                        repoPage++;
+                        await new Promise(resolve => setTimeout(resolve, 100)); // Rate limit delay
+                      }
+                    } catch (repoPageErr: any) {
+                      console.warn(`Failed to fetch commits from ${repoFullName} page ${repoPage}:`, repoPageErr?.message);
+                      hasMoreRepoCommits = false;
+                    }
+                  }
+                  
+                  await new Promise(resolve => setTimeout(resolve, 200)); // Delay between repos
+                } catch (repoErr: any) {
+                  // Skip repos that fail (might be deleted or inaccessible)
+                  continue;
+                }
+              }
+              
+              console.log(`✅ Added ${additionalCommits} additional commits from direct repo fetching`);
+              console.log(`📊 Total commits now: ${commitEvents.length}`);
+            }
+            
             console.log(`📊 Repo display name mapping:`, Array.from(repoDisplayNameMap.entries()).slice(0, 10));
             
             // Verify emails: Check if commits from expected emails are found
